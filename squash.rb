@@ -42,6 +42,7 @@ class SquashFS
 	end
 	
 	MetadataSize = 8192
+	Types = [:dir, :reg, :sym, :blkd, :chrd, :fifo, :sock]
 	
 	attr_reader :sb
 	
@@ -73,7 +74,8 @@ class SquashFS
 		end
 	end
 	
-		
+	
+	
 	def read_id_table
 		bytes = @sb.no_ids * 4
 		nblocks = blocks_needed(bytes, MetadataSize)
@@ -115,9 +117,7 @@ class SquashFS
 		kl.new(read_metadata(pos, kl.round_byte_length))
 	end
 	
-	class Inode
-		Types = [:dir, :reg, :sym, :blkd, :chrd, :fifo, :sock]
-		
+	class Inode	
 		class Base < LEBitStruct
 			unsigned	:type,		16
 			unsigned	:mode,		16
@@ -158,13 +158,18 @@ class SquashFS
 			ret
 		end
 		
-		def initialize(fs, iid)
+		def initialize(fs, pos)
 			@fs = fs
-			pos = MDPos.inode(iid, @fs.sb.inode_table_start)
+			pos = MDPos.inode(pos) unless pos.respond_to?(:offset)
+			pos.block += @fs.sb.inode_table_start
 			@base = @fs.read_md_struct(pos, Base)
 			
 			klass = TypeClasses[@base.type - 1] or raise 'Unsupported type'
 			@type = @fs.read_md_struct(pos, klass)
+		end
+		
+		def directory
+			Directory.new(@fs, self)
 		end
 		
 		def method_missing(meth, *args)
@@ -200,24 +205,38 @@ class SquashFS
 				@name = @fs.read_metadata(pos, @entry.size + 1)
 			end
 			def inode_number; @entry.inode_number + @dirh.inode_number; end
+			def type; Types[@entry.type - 1]; end
+			def pos; MDPos.new(@dirh.start_block, @entry.offset); end
+			def inode; Inode.new(@fs, pos); end
 		end
 		
-		attr_reader :entries
+		attr_reader :children
 		def initialize(fs, inode)
-			@fs = fs
-			@entries = []
+			raise "Not a directory" unless inode.type == :dir
 			
-			# FIXME: loop
+			@fs = fs
+			@children = []
+			
 			pos = MDPos.new(inode.start_block + @fs.sb.directory_table_start,
 				inode.offset)
 			while pos.length + 3 < inode.file_size do
 				dirh = @fs.read_md_struct(pos, Header)
 				(dirh.count + 1).times do
-					@entries << Child.new(@fs, dirh, pos)
-					puts @entries[-1].name
+					@children << Child.new(@fs, dirh, pos)
 				end
 			end
 		end
+	end
+	
+	def recurse(inode = nil, &block)
+		inode ||= @root
+		block[:inode, inode]
+		return unless inode.type == :dir
+		inode.directory.children.each do |c|
+			block[:child, c]
+			recurse(c.inode, &block) if c.type == :dir
+		end
+		block[:closedir, nil]
 	end
 	
 	def initialize(path)
@@ -232,12 +251,22 @@ class SquashFS
 		read_id_table
 		@root = Inode.new(self, @sb.root_inode)
 		
-		@root.dump
 		dir = Directory.new(self, @root)
 	end
 end
 
-SquashFS.new(ARGV.shift)
+fs = SquashFS.new(ARGV.shift)
+parts = []
+fs.recurse do |w, o|
+	case w
+	when :child
+		parts << o.name
+		puts parts.join('/')
+		parts.pop unless o.type == :dir
+	when :closedir
+		parts.pop
+	end
+end
 
 # TODO
 # directory reading
