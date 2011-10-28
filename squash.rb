@@ -305,13 +305,22 @@ class SquashFS
 		end
 	end
 	
-	def recurse(inode = nil, &block)
+	def lookup(path)
+		parts = path.split('/')
+		inode = root
+		while inode && !parts.empty?
+			inode = inode.directory.lookup(parts.shift).inode
+		end
+		inode
+	end
+	
+	def scan_files(inode = nil, &block)
 		inode ||= root
 		block[:inode, inode]
 		return unless inode.type == :dir
 		inode.directory.children do |c|
 			block[:child, c]
-			recurse(c.inode, &block) if c.type == :dir
+			scan_files(c.inode, &block) if c.type == :dir
 		end
 		block[:closedir, nil]
 	end
@@ -334,16 +343,11 @@ class SquashFS
 end
 
 fs = SquashFS.new(ARGV.shift)
-
-d = fs.root.directory
-d = d.lookup('usr').inode.directory
-d = d.lookup('lib').inode.directory
-d = d.lookup('xulrunner').inode
-d.dump
+fs.lookup('usr/lib/xulrunner').dump
 exit
 
 parts = []
-fs.recurse do |w, o|
+fs.scan_files do |w, o|
 	case w
 	when :child
 		parts << o.name
@@ -357,7 +361,6 @@ end
 # TODO
 # data blocks / fragments
 # all file types
-# dir indexes
 # xattrs
 # lookup/export?
 # compression types
