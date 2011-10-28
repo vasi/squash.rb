@@ -75,15 +75,14 @@ class SquashFS
 		end
 	end
 	
-	
-	def read_id_table
-		bytes = @sb.no_ids * 4
-		nblocks = blocks_needed(bytes, MetadataSize)
-		blocknos = unpack64(read(@sb.id_table_start, 8 * nblocks))
-		@id_table = []
-		blocknos.each { |b| @id_table.concat(@md_cache.get(b).unpack('V*')) }
+	def read_id_idxs
+		nblocks = blocks_needed(@sb.no_ids * 4, MetadataSize)
+		@id_idxs = unpack64(read(@sb.id_table_start, 8 * nblocks))
 	end
-	def id(idx); @id_table[idx]; end
+	def id(i)
+		block = @id_idxs[i * 4 / MetadataSize]
+		@md_cache.get(block)[(i * 4) % MetadataSize, 4].unpack('V').first
+	end
 	
 	def read_block_size(off, header = nil)
 		hsz = header ? 0 : 2
@@ -294,7 +293,7 @@ class SquashFS
 		
 		@md_cache = BlockCache.new(self, BlockCache::MetadataCacheSize)
 		@frag_cache = BlockCache.new(self, BlockCache::FragmentCacheSize)
-		read_id_table
+		read_id_idxs
 	end
 end
 
@@ -302,6 +301,8 @@ fs = SquashFS.new(ARGV.shift)
 parts = []
 fs.recurse do |w, o|
 	case w
+	when :inode
+		o.dump
 	when :child
 		parts << o.name
 		puts parts.join('/')
@@ -312,7 +313,6 @@ fs.recurse do |w, o|
 end
 
 # TODO
-# don't pre-read ids
 # data blocks / fragments
 # all file types
 # dir indexes
