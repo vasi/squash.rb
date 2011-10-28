@@ -76,21 +76,15 @@ class SquashFS
 	end
 	
 	
-	
 	def read_id_table
 		bytes = @sb.no_ids * 4
 		nblocks = blocks_needed(bytes, MetadataSize)
 		blocknos = unpack64(read(@sb.id_table_start, 8 * nblocks))
 		@id_table = []
-		blocknos.each { |b| @id_table.concat(read_block(b).unpack('V*')) }
+		blocknos.each { |b| @id_table.concat(@md_cache.get(b).unpack('V*')) }
 	end
 	def id(idx); @id_table[idx]; end
 	
-	def read_block(off)
-		sz, d = read_block_size(off)
-		return d
-	end
-		
 	def read_block_size(off, header = nil)
 		hsz = header ? 0 : 2
 		header ||= read(off, hsz).unpack('v').first
@@ -106,7 +100,7 @@ class SquashFS
 	def read_metadata(pos, size)
 		ret = ""
 		while size > 0
-			bsz, data = read_block_size(pos.block)
+			bsz, data = @md_cache.get_size(pos.block)
 			take = [data.size - pos.offset, size].min
 			ret << data[pos.offset, take]
 			
@@ -249,6 +243,33 @@ class SquashFS
 		end
 	end
 	
+	class BlockCache
+		MetadataCacheSize = 8
+		FragmentCacheSize = 3
+		
+		Entry = Struct.new(:off, :data, :bsize)
+		
+		def initialize(fs, size)
+			@fs = fs
+			@blocks = Array.new(size)
+			@pos = 0 # next to eject
+		end
+		
+		def get_size(off, len = nil)
+			unless e = @blocks.find { |e| e && e.off == off }
+				bsz, data = @fs.read_block_size(off, len)
+				e = @blocks[@pos] = Entry.new(off, data, bsz)
+				@pos = (@pos + 1) % @blocks.size # Round robin ejection
+			end
+			return e.bsize, e.data
+		end
+		
+		def get(off, len = nil)
+			bsz, d = get_size(off, len)
+			return d
+		end
+	end
+	
 	def recurse(inode = nil, &block)
 		inode ||= root
 		block[:inode, inode]
@@ -271,6 +292,8 @@ class SquashFS
 			unless @sb.vers_maj == 4 && @sb.vers_min >= 0
 		raise 'FIXME: Compression not zlib' unless @sb.compression == 1
 		
+		@md_cache = BlockCache.new(self, BlockCache::MetadataCacheSize)
+		@frag_cache = BlockCache.new(self, BlockCache::FragmentCacheSize)
 		read_id_table
 	end
 end
@@ -289,11 +312,10 @@ fs.recurse do |w, o|
 end
 
 # TODO
-# directory reading
+# don't pre-read ids
 # data blocks / fragments
 # all file types
 # dir indexes
 # xattrs
 # lookup/export
 # compression types
-# metadata, block caches
