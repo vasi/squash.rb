@@ -4,6 +4,7 @@ require 'rubygems'
 require 'bit-struct'
 require 'zlib'
 require 'time'
+require 'pp'
 
 class SquashFS
 	class LEBitStruct < BitStruct; default_options :endian => :little; end
@@ -86,19 +87,26 @@ class SquashFS
 	def id(idx); @id_table[idx]; end
 	
 	def read_block(off)
-		header = read(off, 2).unpack('v').first
+		sz, d = read_block_size(off)
+		return d
+	end
+		
+	def read_block_size(off, header = nil)
+		hsz = header ? 0 : 2
+		header ||= read(off, hsz).unpack('v').first
 		size = header & ~(1 << 15)
 		compressed = (header - size).zero?
+		next_block = @io.tell + size
 		
 		data = @io.read(size)
 		data = Zlib::Inflate.inflate(data) if compressed
-		return data
+		return [hsz + size, data]
 	end
 	
 	def read_metadata(pos, size)
 		ret = ""
 		while size > 0
-			data = read_block(pos.block)
+			bsz, data = read_block_size(pos.block)
 			take = [data.size - pos.offset, size].min
 			ret << data[pos.offset, take]
 			
@@ -106,7 +114,7 @@ class SquashFS
 			pos.offset += take
 			pos.length += take
 			if pos.offset == data.size
-				pos.block += data.size
+				pos.block += bsz
 				pos.offset = 0
 			end
 		end
@@ -133,7 +141,17 @@ class SquashFS
 			unsigned	:offset,		16
 			unsigned	:parent_inode,	32
 		end
-		TypeClasses = [Dir]
+		class LDir < LEBitStruct
+			unsigned	:nlink,			32
+			unsigned	:file_size,		32
+			unsigned	:start_block,	32
+			unsigned	:parent_inode,	32
+			unsigned	:idx_count,		16
+			unsigned	:offset,		16
+			unsigned	:xattr,			32
+		end
+		TypeClasses = [Dir, nil, nil, nil, nil, nil, nil,
+			LDir]
 		
 		def type_idx; @base.type % Types.size - 1; end
 		def type; Types[type_idx]; end
@@ -154,7 +172,6 @@ class SquashFS
 					ret[-1,1] = ret[-1] == ?- ? c.upcase : c
 				end
 			end
-			
 			ret
 		end
 		
@@ -166,10 +183,15 @@ class SquashFS
 			
 			klass = TypeClasses[@base.type - 1] or raise 'Unsupported type'
 			@type = @fs.read_md_struct(pos, klass)
+			@pos = pos
 		end
 		
 		def directory
 			Directory.new(@fs, self)
+		end
+		
+		def respond_to?(meth)
+			super || @type.respond_to?(meth) || @base.respond_to?(meth)
 		end
 		
 		def method_missing(meth, *args)
@@ -213,7 +235,6 @@ class SquashFS
 		attr_reader :children
 		def initialize(fs, inode)
 			raise "Not a directory" unless inode.type == :dir
-			
 			@fs = fs
 			@children = []
 			
@@ -229,7 +250,7 @@ class SquashFS
 	end
 	
 	def recurse(inode = nil, &block)
-		inode ||= @root
+		inode ||= root
 		block[:inode, inode]
 		return unless inode.type == :dir
 		inode.directory.children.each do |c|
@@ -238,6 +259,8 @@ class SquashFS
 		end
 		block[:closedir, nil]
 	end
+	
+	def root; Inode.new(self, @sb.root_inode); end
 	
 	def initialize(path)
 		@io = open(path)
@@ -249,9 +272,6 @@ class SquashFS
 		raise 'FIXME: Compression not zlib' unless @sb.compression == 1
 		
 		read_id_table
-		@root = Inode.new(self, @sb.root_inode)
-		
-		dir = Directory.new(self, @root)
 	end
 end
 
