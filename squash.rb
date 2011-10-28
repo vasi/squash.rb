@@ -61,7 +61,16 @@ class SquashFS
 	end
 	def unpack64(s)
 		Int64.new(s).map { |x| x.i }
-	end	
+	end
+	
+	class InodeID
+		attr_accessor :block, :offset
+		def initialize(fs, n)
+			@offset = n & 0xffff
+			@block = (n >> 16) + fs.sb.inode_table_start
+		end
+	end
+	
 		
 	def read_id_table
 		bytes = @sb.no_ids * 4
@@ -82,18 +91,25 @@ class SquashFS
 		return data
 	end
 	
-	def read_bytes(block, off, size)
+	def read_metadata(iid, size)
 		ret = ""
 		while size > 0
-			data = read_block(block)
-			take = [data.size - off, size].min
-			ret << data[off, take]
+			data = read_block(iid.block)
+			take = [data.size - iid.offset, size].min
+			ret << data[iid.offset, take]
 			
 			size -= take
-			off = 0
-			block += 1
+			iid.offset += take
+			if iid.offset == data.size
+				iid.block += data.size
+				iid.offset = 0
+			end
 		end
+		
 		ret
+	end
+	def read_md_struct(iid, kl)
+		kl.new(read_metadata(iid, kl.round_byte_length))
 	end
 	
 	class Inode
@@ -139,17 +155,13 @@ class SquashFS
 			ret
 		end
 		
-		def initialize(fs, id)
+		def initialize(fs, iid)
 			@fs = fs
-			offset = id & 0xffff
-			block = (id >> 16) + @fs.sb.inode_table_start
-			blen = Base.round_byte_length
-			@base = Base.new(@fs.read_bytes(block, offset, blen))
+			iid = InodeID.new(fs, iid)
+			@base = @fs.read_md_struct(iid, Base)
 			
 			klass = TypeClasses[@base.type - 1] or raise 'Unsupported type'
-			tdata = @fs.read_bytes(block, offset,
-				blen + klass.round_byte_length)
-			@type = klass.new(tdata[blen, tdata.size])
+			@type = @fs.read_md_struct(iid, klass)
 			
 			dump
 			p @type
@@ -185,3 +197,4 @@ SquashFS.new(ARGV.shift)
 # xattrs
 # lookup/export
 # compression types
+# metadata, block caches
