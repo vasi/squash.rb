@@ -168,6 +168,8 @@ class SquashFS
 			ret
 		end
 		
+		def next_pos; @pos.dup; end
+		
 		def initialize(fs, pos)
 			@fs = fs
 			pos = MDPos.inode(pos) unless pos.respond_to?(:offset)
@@ -212,6 +214,12 @@ class SquashFS
 			unsigned	:type, 16
 			unsigned	:size, 16
 		end
+		class IndexEntry < LEBitStruct
+			unsigned	:dirpos, 32
+			unsigned	:start_block, 32
+			unsigned	:namelen, 32
+		end
+		
 		class Child
 			attr_reader :entry, :name
 			def initialize(fs, dirh, pos)
@@ -225,20 +233,48 @@ class SquashFS
 			def inode; Inode.new(@fs, pos); end
 		end
 		
-		attr_reader :children
-		def initialize(fs, inode)
-			raise "Not a directory" unless inode.type == :dir
-			@fs = fs
-			@children = []
+		def children(pos = nil, &block)
+			pos ||= start_pos
 			
-			pos = MDPos.new(inode.start_block + @fs.sb.directory_table_start,
-				inode.offset)
-			while pos.length + 3 < inode.file_size do
+			while pos.length + 3 < @inode.file_size do
 				dirh = @fs.read_md_struct(pos, Header)
 				(dirh.count + 1).times do
-					@children << Child.new(@fs, dirh, pos)
+					block[Child.new(@fs, dirh, pos)]
 				end
 			end
+		end
+		
+		def start_pos
+			MDPos.new(@inode.start_block + @fs.sb.directory_table_start,
+				@inode.offset)
+		end
+		
+		def find_pos(name)
+			pos = start_pos
+			return pos unless @inode.respond_to?(:idx_count)
+			
+			ipos = @inode.next_pos
+			@inode.idx_count.times do
+				idx = @fs.read_md_struct(ipos, IndexEntry)
+				iname = @fs.read_metadata(ipos, idx.namelen + 1)
+				break if name < iname
+				
+				pos.length = idx.dirpos
+				pos.block = idx.start_block + @fs.sb.directory_table_start
+			end
+			pos.offset = (pos.offset + pos.length) % MetadataSize
+			return pos
+		end
+		
+		def lookup(name)
+			pos = find_pos(name)
+			children(pos) { |c| return c if c.name == name }
+			return nil
+		end
+		
+		def initialize(fs, inode)
+			raise "Not a directory" unless inode.type == :dir
+			@fs, @inode = fs, inode
 		end
 	end
 	
@@ -273,7 +309,7 @@ class SquashFS
 		inode ||= root
 		block[:inode, inode]
 		return unless inode.type == :dir
-		inode.directory.children.each do |c|
+		inode.directory.children do |c|
 			block[:child, c]
 			recurse(c.inode, &block) if c.type == :dir
 		end
@@ -298,11 +334,17 @@ class SquashFS
 end
 
 fs = SquashFS.new(ARGV.shift)
+
+d = fs.root.directory
+d = d.lookup('usr').inode.directory
+d = d.lookup('lib').inode.directory
+d = d.lookup('xulrunner').inode
+d.dump
+exit
+
 parts = []
 fs.recurse do |w, o|
 	case w
-	when :inode
-		o.dump
 	when :child
 		parts << o.name
 		puts parts.join('/')
@@ -317,5 +359,5 @@ end
 # all file types
 # dir indexes
 # xattrs
-# lookup/export
+# lookup/export?
 # compression types
