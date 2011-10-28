@@ -63,11 +63,13 @@ class SquashFS
 		Int64.new(s).map { |x| x.i }
 	end
 	
-	class InodeID
-		attr_accessor :block, :offset
-		def initialize(fs, n)
-			@offset = n & 0xffff
-			@block = (n >> 16) + fs.sb.inode_table_start
+	class MDPos
+		attr_accessor :block, :offset, :length
+		def initialize(b, o)
+			@block, @offset, @length = b, o , 0
+		end
+		def self.inode(n, add = 0)
+			new((n >> 16) + add, n & 0xffff)
 		end
 	end
 	
@@ -91,25 +93,26 @@ class SquashFS
 		return data
 	end
 	
-	def read_metadata(iid, size)
+	def read_metadata(pos, size)
 		ret = ""
 		while size > 0
-			data = read_block(iid.block)
-			take = [data.size - iid.offset, size].min
-			ret << data[iid.offset, take]
+			data = read_block(pos.block)
+			take = [data.size - pos.offset, size].min
+			ret << data[pos.offset, take]
 			
 			size -= take
-			iid.offset += take
-			if iid.offset == data.size
-				iid.block += data.size
-				iid.offset = 0
+			pos.offset += take
+			pos.length += take
+			if pos.offset == data.size
+				pos.block += data.size
+				pos.offset = 0
 			end
 		end
 		
 		ret
 	end
-	def read_md_struct(iid, kl)
-		kl.new(read_metadata(iid, kl.round_byte_length))
+	def read_md_struct(pos, kl)
+		kl.new(read_metadata(pos, kl.round_byte_length))
 	end
 	
 	class Inode
@@ -157,19 +160,63 @@ class SquashFS
 		
 		def initialize(fs, iid)
 			@fs = fs
-			iid = InodeID.new(fs, iid)
-			@base = @fs.read_md_struct(iid, Base)
+			pos = MDPos.inode(iid, @fs.sb.inode_table_start)
+			@base = @fs.read_md_struct(pos, Base)
 			
 			klass = TypeClasses[@base.type - 1] or raise 'Unsupported type'
-			@type = @fs.read_md_struct(iid, klass)
-			
-			dump
-			p @type
+			@type = @fs.read_md_struct(pos, klass)
+		end
+		
+		def method_missing(meth, *args)
+			[@type, @base].each do |b|
+				return b.send(meth, *args) if b.respond_to?(meth)
+			end
+			super
 		end
 		
 		def dump
 			puts "inode %d: type %s, mode %s, uid %d, gid %d, time %s" %
 				[@base.inode_number, type, modestr, uid, gid, time.iso8601]
+		end
+	end
+	
+	class Directory
+		class Header < LEBitStruct
+			unsigned	:count, 32
+			unsigned	:start_block, 32
+			unsigned	:inode_number, 32
+		end
+		class Entry < LEBitStruct
+			unsigned	:offset, 16
+			unsigned	:inode_number, 16
+			unsigned	:type, 16
+			unsigned	:size, 16
+		end
+		class Child
+			attr_reader :entry, :name
+			def initialize(fs, dirh, pos)
+				@fs, @dirh = fs, dirh
+				@entry = @fs.read_md_struct(pos, Entry)
+				@name = @fs.read_metadata(pos, @entry.size + 1)
+			end
+			def inode_number; @entry.inode_number + @dirh.inode_number; end
+		end
+		
+		attr_reader :entries
+		def initialize(fs, inode)
+			@fs = fs
+			@entries = []
+			
+			# FIXME: loop
+			pos = MDPos.new(inode.start_block + @fs.sb.directory_table_start,
+				inode.offset)
+			while pos.length + 3 < inode.file_size do
+				dirh = @fs.read_md_struct(pos, Header)
+				(dirh.count + 1).times do
+					@entries << Child.new(@fs, dirh, pos)
+					puts @entries[-1].name
+				end
+			end
 		end
 	end
 	
@@ -184,6 +231,9 @@ class SquashFS
 		
 		read_id_table
 		@root = Inode.new(self, @sb.root_inode)
+		
+		@root.dump
+		dir = Directory.new(self, @root)
 	end
 end
 
