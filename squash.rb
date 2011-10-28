@@ -84,12 +84,33 @@ class SquashFS
 		@md_cache.get(block)[(i * 4) % MetadataSize, 4].unpack('V').first
 	end
 	
-	def read_block_size(off, header = nil)
-		hsz = header ? 0 : 2
-		header ||= read(off, hsz).unpack('v').first
+	class FragEntry < LEBitStruct
+		unsigned :start_block, 64
+		unsigned :size, 32
+		unsigned :pad, 32
+	end
+	FragEntSize = FragEntry.round_byte_length
+	def read_frag_idxs
+		nblocks = blocks_needed(@sb.fragments * FragEntSize, MetadataSize)
+		@frag_idxs = unpack64(read(@sb.fragment_table_start, 8 * nblocks))
+	end
+	def frag_lookup(i)
+		block = @frag_idxs[i * FragEntSize / MetadataSize]
+		FragEntry.new(@md_cache.get(block)[(i * FragEntSize) % MetadataSize,
+			FragEntSize])
+	end
+	
+	def read_block_size(off, len = nil)
+		if len
+			hsz = 0
+			header = len
+			@io.seek(off)
+		else
+			hsz = 2
+			header = read(off, hsz).unpack('v').first
+		end
 		size = header & ~(1 << 15)
 		compressed = (header - size).zero?
-		next_block = @io.tell + size
 		
 		data = @io.read(size)
 		data = Zlib::Inflate.inflate(data) if compressed
@@ -118,7 +139,14 @@ class SquashFS
 		kl.new(read_metadata(pos, kl.round_byte_length))
 	end
 	
-	class Inode	
+	def read_fragment(i)
+		frag = frag_lookup(i)
+		@frag_cache.get(frag.start_block, frag.size)
+	end
+	
+	class Inode
+		InvalidFragment = 0xffffffff
+		
 		class Base < LEBitStruct
 			unsigned	:type,		16
 			unsigned	:mode,		16
@@ -134,6 +162,12 @@ class SquashFS
 			unsigned	:offset,		16
 			unsigned	:parent_inode,	32
 		end
+		class Reg < LEBitStruct
+			unsigned	:start_block,	32
+			unsigned	:fragment,		32
+			unsigned	:offset,		32
+			unsigned	:file_size,		32
+		end
 		class LDir < LEBitStruct
 			unsigned	:nlink,			32
 			unsigned	:file_size,		32
@@ -143,7 +177,7 @@ class SquashFS
 			unsigned	:offset,		16
 			unsigned	:xattr,			32
 		end
-		TypeClasses = [Dir, nil, nil, nil, nil, nil, nil,
+		TypeClasses = [Dir, Reg, nil, nil, nil, nil, nil,
 			LDir]
 		
 		def type_idx; @base.type % Types.size - 1; end
@@ -170,6 +204,8 @@ class SquashFS
 		
 		def next_pos; @pos.dup; end
 		
+		attr_reader :xtra
+		
 		def initialize(fs, pos)
 			@fs = fs
 			pos = MDPos.inode(pos) unless pos.respond_to?(:offset)
@@ -177,7 +213,7 @@ class SquashFS
 			@base = @fs.read_md_struct(pos, Base)
 			
 			klass = TypeClasses[@base.type - 1] or raise 'Unsupported type'
-			@type = @fs.read_md_struct(pos, klass)
+			@xtra = @fs.read_md_struct(pos, klass)
 			@pos = pos
 		end
 		
@@ -186,11 +222,11 @@ class SquashFS
 		end
 		
 		def respond_to?(meth)
-			super || @type.respond_to?(meth) || @base.respond_to?(meth)
+			super || @xtra.respond_to?(meth) || @base.respond_to?(meth)
 		end
 		
 		def method_missing(meth, *args)
-			[@type, @base].each do |b|
+			[@xtra, @base].each do |b|
 				return b.send(meth, *args) if b.respond_to?(meth)
 			end
 			super
@@ -199,6 +235,12 @@ class SquashFS
 		def dump
 			puts "inode %d: type %s, mode %s, uid %d, gid %d, time %s" %
 				[@base.inode_number, type, modestr, uid, gid, time.iso8601]
+		end
+
+		def read_fragment
+			return nil if @xtra.fragment == InvalidFragment
+			data = @fs.read_fragment(@xtra.fragment)
+			return data[@xtra.offset, @xtra.file_size % @fs.sb.block_size]
 		end
 	end
 	
@@ -339,11 +381,13 @@ class SquashFS
 		@md_cache = BlockCache.new(self, BlockCache::MetadataCacheSize)
 		@frag_cache = BlockCache.new(self, BlockCache::FragmentCacheSize)
 		read_id_idxs
+		read_frag_idxs
 	end
 end
 
 fs = SquashFS.new(ARGV.shift)
-fs.lookup('usr/lib/xulrunner').dump
+file = fs.lookup('etc/shells')
+puts file.read_fragment
 exit
 
 parts = []
@@ -359,8 +403,10 @@ fs.scan_files do |w, o|
 end
 
 # TODO
-# data blocks / fragments
+# data blocks
+# parent finding
 # all file types
 # xattrs
 # lookup/export?
 # compression types
+# holes?
