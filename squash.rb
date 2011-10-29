@@ -110,6 +110,7 @@ class SquashFS
 	end
 	# Read block, returning also the size
 	def read_block_size(off, len = nil)
+#		STDERR.puts [off, len].inspect
 		if len
 			hsz = 0
 			header = len
@@ -126,6 +127,7 @@ class SquashFS
 	end
 	
 	def read_metadata(pos, size)
+#		STDERR.puts [pos, size].inspect
 		ret = ""
 		while size > 0
 			bsz, data = @md_cache.get_size(pos.block)
@@ -265,24 +267,25 @@ class SquashFS
 		
 		def read_block(n, bscache = nil)
 			start = @xtra.start_block
-			bsz = 0
+			hdr = 0
 			(bscache || read_block_sizes).each_with_index do |sz,i|
-				comp, bsz = SquashFS.size_parse(sz)
+				hdr = sz
 				break if i == n
+				comp, bsz = SquashFS.size_parse(sz)
 				start += bsz
 			end
 			
-			if bsz == 0 # Hole
+			if hdr == 0 # Hole
 				dsz = [@xtra.file_size - n * @fs.sb.block_size,
 					@fs.sb.block_size].min
 				return "\0" * dsz
 			else
-				bsz, data = @fs.read_block_size(start, bsz)
+				bsz, data = @fs.read_block_size(start, hdr)
 				return data
 			end
 		end
 		
-		def read_range(start, size)
+		def read_range(start, size, &block)
 			raise 'Too far' if start > @xtra.file_size
 			bsc = nil
 			ret = []
@@ -295,17 +298,16 @@ class SquashFS
 					read_block(bnum, bsc)
 				end
 				take = [data.size - off, size].min
-				ret << data[off, take]
+				data = data[off, take] if off != 0 && take != data.size
+				block ? block[data] : (ret << data)
 				start += take
 				size -= take
 			end
-			return ret.join('')
+			return block ? nil : ret.join('')
 		end
 		
-		def read_file
-			data = (0...block_count).map { |n| read_block(n) }
-			data << read_fragment if fragment?
-			data.join('')
+		def read_file(&block)
+			read_range(0, @xtra.file_size, &block)
 		end
 		
 		def pretty_print_instance_variables
@@ -455,8 +457,12 @@ class SquashFS
 end
 
 fs = SquashFS.new(ARGV.shift)
-file = fs.lookup('holey')
-print file.read_file
+file = fs.lookup('vs2010.iso')
+file.read_file { |d| print d }
+exit
+
+puts file.read_range(file.file_size - 200_000, 100).size
+puts file.read_range(1223475200, 100).size
 exit
 
 parts = []
@@ -473,10 +479,8 @@ end
 
 # TODO
 # coalesce table code
-# data blocks
 # data block indices
 # more file types (symlinks!)
 # xattrs
 # lookup/export?
 # compression types
-# holes?
