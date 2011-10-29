@@ -52,8 +52,8 @@ class SquashFS
 		@io.read(size)
 	end
 	
-	def blocks_needed(size, block_size)
-		q, r = size.divmod(block_size)
+	def self.divceil(dividend, divisor)
+		q, r = dividend.divmod(divisor)
 		q += 1 if r != 0
 		return q
 	end
@@ -61,7 +61,7 @@ class SquashFS
 	class Int64 < BitStruct::Vector
 		unsigned :i, 64, :endian => :little
 	end
-	def unpack64(s)
+	def self.unpack64(s)
 		Int64.new(s).map { |x| x.i }
 	end
 	
@@ -76,8 +76,8 @@ class SquashFS
 	end
 	
 	def read_id_idxs
-		nblocks = blocks_needed(@sb.no_ids * 4, MetadataSize)
-		@id_idxs = unpack64(read(@sb.id_table_start, 8 * nblocks))
+		nblocks = SquashFS.divceil(@sb.no_ids * 4, MetadataSize)
+		@id_idxs = SquashFS.unpack64(read(@sb.id_table_start, 8 * nblocks))
 	end
 	def id(i)
 		block = @id_idxs[i * 4 / MetadataSize]
@@ -91,8 +91,9 @@ class SquashFS
 	end
 	FragEntSize = FragEntry.round_byte_length
 	def read_frag_idxs
-		nblocks = blocks_needed(@sb.fragments * FragEntSize, MetadataSize)
-		@frag_idxs = unpack64(read(@sb.fragment_table_start, 8 * nblocks))
+		nblocks = SquashFS.divceil(@sb.fragments * FragEntSize, MetadataSize)
+		@frag_idxs = SquashFS.unpack64(
+			read(@sb.fragment_table_start, 8 * nblocks))
 	end
 	def frag_lookup(i)
 		block = @frag_idxs[i * FragEntSize / MetadataSize]
@@ -100,6 +101,13 @@ class SquashFS
 			FragEntSize])
 	end
 	
+	def self.size_parse(sz, meta = false)
+		flag = 1 << (meta ? 15 : 24)
+		compressed = (sz & flag).zero?
+		size = (sz & ~flag)
+		size = flag if meta && size.zero?
+		return [compressed, size]
+	end
 	def read_block_size(off, len = nil)
 		if len
 			hsz = 0
@@ -109,8 +117,7 @@ class SquashFS
 			hsz = 2
 			header = read(off, hsz).unpack('v').first
 		end
-		size = header & ~(1 << 15)
-		compressed = (header - size).zero?
+		compressed, size = SquashFS.size_parse(header, !len)
 		
 		data = @io.read(size)
 		data = Zlib::Inflate.inflate(data) if compressed
@@ -236,11 +243,33 @@ class SquashFS
 			puts "inode %d: type %s, mode %s, uid %d, gid %d, time %s" %
 				[@base.inode_number, type, modestr, uid, gid, time.iso8601]
 		end
-
+		
+		def fragment?; @xtra.fragment != InvalidFragment; end
+		
 		def read_fragment
-			return nil if @xtra.fragment == InvalidFragment
+			return nil unless fragment?
 			data = @fs.read_fragment(@xtra.fragment)
 			return data[@xtra.offset, @xtra.file_size % @fs.sb.block_size]
+		end
+		
+		def read_blocks
+			bs = @fs.sb.block_size
+			sz = @xtra.file_size
+			nblocks = fragment? ? (sz / bs) : SquashFS.divceil(sz, bs)
+			bsizes = @fs.read_metadata(next_pos, nblocks * 4).unpack('V*')
+			
+			data = []
+			start = @xtra.start_block
+			bsizes.each do |bsize|
+				bsz, d = @fs.read_block_size(start, bsize)
+				data << d
+				start += bsz
+			end
+			return data.join('')
+		end
+		
+		def pretty_print_instance_variables
+			instance_variables.sort - ['@fs']
 		end
 	end
 	
@@ -386,8 +415,9 @@ class SquashFS
 end
 
 fs = SquashFS.new(ARGV.shift)
-file = fs.lookup('etc/shells')
-puts file.read_fragment
+file = fs.lookup('home/vasi/.thunderbird/0t63xw66.default/ImapMail/imap.googlemail.com/[Gmail].sbd/Sent Mail')
+#file = fs.lookup('comb')
+puts file.read_blocks
 exit
 
 parts = []
@@ -403,9 +433,8 @@ fs.scan_files do |w, o|
 end
 
 # TODO
-# data blocks
-# parent finding
-# all file types
+# data blocks (holes!?)
+# more file types (symlinks!)
 # xattrs
 # lookup/export?
 # compression types
