@@ -108,6 +108,7 @@ class SquashFS
 		size = flag if meta && size.zero?
 		return [compressed, size]
 	end
+	# Read block, returning also the size
 	def read_block_size(off, len = nil)
 		if len
 			hsz = 0
@@ -252,20 +253,47 @@ class SquashFS
 			return data[@xtra.offset, @xtra.file_size % @fs.sb.block_size]
 		end
 		
-		def read_blocks
+		def block_count
 			bs = @fs.sb.block_size
 			sz = @xtra.file_size
-			nblocks = fragment? ? (sz / bs) : SquashFS.divceil(sz, bs)
-			bsizes = @fs.read_metadata(next_pos, nblocks * 4).unpack('V*')
-			
-			data = []
+			fragment? ? (sz / bs) : SquashFS.divceil(sz, bs)
+		end
+		
+		def read_block_sizes
+			@fs.read_metadata(next_pos, block_count * 4).unpack('V*')
+		end
+		
+		def read_block(n)
 			start = @xtra.start_block
-			bsizes.each do |bsize|
-				bsz, d = @fs.read_block_size(start, bsize)
-				data << d
+			bsz = 0
+			read_block_sizes.each_with_index do |sz,i|
+				comp, bsz = SquashFS.size_parse(sz)
+				break if i == n
 				start += bsz
 			end
-			return data.join('')
+			bsz, data = @fs.read_block_size(start, bsz)
+			return data
+		end
+		
+		def read_range(start, size)
+			raise 'Too far' if start > @xtra.file_size
+			ret = []
+			while size > 0 && start < @xtra.file_size
+				bnum, off = start.divmod(@fs.sb.block_size)
+				data = (bnum >= block_count) ? read_fragment \
+					: read_block(bnum)
+				take = [data.size - off, size].min
+				ret << data[off, take]
+				start += take
+				size -= take
+			end
+			return ret.join('')
+		end
+		
+		def read_file
+			data = (0...block_count).map { |n| read_block(n) }
+			data << read_fragment if fragment?
+			data.join('')
 		end
 		
 		def pretty_print_instance_variables
@@ -416,8 +444,7 @@ end
 
 fs = SquashFS.new(ARGV.shift)
 file = fs.lookup('home/vasi/.thunderbird/0t63xw66.default/ImapMail/imap.googlemail.com/[Gmail].sbd/Sent Mail')
-#file = fs.lookup('comb')
-puts file.read_blocks
+print file.read_file
 exit
 
 parts = []
@@ -433,6 +460,7 @@ fs.scan_files do |w, o|
 end
 
 # TODO
+# coalesce table code
 # data blocks (holes!?)
 # more file types (symlinks!)
 # xattrs
