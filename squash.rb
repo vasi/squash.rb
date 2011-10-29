@@ -263,25 +263,37 @@ class SquashFS
 			@fs.read_metadata(next_pos, block_count * 4).unpack('V*')
 		end
 		
-		def read_block(n)
+		def read_block(n, bscache = nil)
 			start = @xtra.start_block
 			bsz = 0
-			read_block_sizes.each_with_index do |sz,i|
+			(bscache || read_block_sizes).each_with_index do |sz,i|
 				comp, bsz = SquashFS.size_parse(sz)
 				break if i == n
 				start += bsz
 			end
-			bsz, data = @fs.read_block_size(start, bsz)
-			return data
+			
+			if bsz == 0 # Hole
+				dsz = [@xtra.file_size - n * @fs.sb.block_size,
+					@fs.sb.block_size].min
+				return "\0" * dsz
+			else
+				bsz, data = @fs.read_block_size(start, bsz)
+				return data
+			end
 		end
 		
 		def read_range(start, size)
 			raise 'Too far' if start > @xtra.file_size
+			bsc = nil
 			ret = []
 			while size > 0 && start < @xtra.file_size
 				bnum, off = start.divmod(@fs.sb.block_size)
-				data = (bnum >= block_count) ? read_fragment \
-					: read_block(bnum)
+				data = if bnum >= block_count
+					read_fragment
+				else
+					bsc ||= read_block_sizes
+					read_block(bnum, bsc)
+				end
 				take = [data.size - off, size].min
 				ret << data[off, take]
 				start += take
@@ -443,7 +455,7 @@ class SquashFS
 end
 
 fs = SquashFS.new(ARGV.shift)
-file = fs.lookup('home/vasi/.thunderbird/0t63xw66.default/ImapMail/imap.googlemail.com/[Gmail].sbd/Sent Mail')
+file = fs.lookup('holey')
 print file.read_file
 exit
 
@@ -461,7 +473,8 @@ end
 
 # TODO
 # coalesce table code
-# data blocks (holes!?)
+# data blocks
+# data block indices
 # more file types (symlinks!)
 # xattrs
 # lookup/export?
