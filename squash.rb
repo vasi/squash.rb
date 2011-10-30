@@ -45,7 +45,7 @@ class SquashFS
 	MetadataSize = 8192
 	Types = [:dir, :reg, :sym, :blkd, :chrd, :fifo, :sock]
 	
-	attr_reader :sb
+	attr_reader :sb, :meta_idx
 	
 	def read(off, size)
 		@io.seek(off)
@@ -303,7 +303,7 @@ class SquashFS
 			fragment? ? (sz / bs) : SquashFS.divceil(sz, bs)
 		end
 		
-		def read_block_sizes
+		def read_block_sizes # FIXME
 			@fs.read_metadata(next_pos, block_count * 4).unpack('V*')
 		end
 		
@@ -358,6 +358,22 @@ class SquashFS
 		
 		def pretty_print_instance_variables
 			instance_variables.sort - ['@fs']
+		end
+	end
+	
+	class MetaIndex
+		Slots = 16
+		
+		def initialize(fs, slots)
+			@fs = fs
+			@slots = Array.new(slots)
+			@pos = 0
+		end
+		
+		def get_index(inode, start, len)
+			sizes = @fs.read_metadata(inode.next_pos, inode.block_count * 4).
+				unpack('V*')
+			return inode.start_block, 0, sizes
 		end
 	end
 	
@@ -473,15 +489,25 @@ class SquashFS
 		inode
 	end
 	
-	def scan_files(inode = nil, &block)
+	def scan(inode = nil, &block)
 		inode ||= root
-		block[:inode, inode]
-		return unless inode.type == :dir
-		inode.directory.children do |c|
-			block[:child, c]
-			scan_files(c.inode, &block) if c.type == :dir
+		def scan_inner(inode, name, &block)
+			block[inode, name]
+			return unless inode.type == :dir
+			inode.directory.children do |c|
+				scan_inner(c.inode, c.name, &block)
+			end
+			block[nil, nil]
 		end
-		block[:closedir, nil]
+		scan_inner(inode || root, nil, &block)
+	end
+	def scan_paths(inode = nil, &block)
+		parts = []
+		scan(inode) do |i, name|
+			parts << name if name
+			block[i, parts.join('/')] if i
+			parts.pop unless i && i.type == :dir
+		end
 	end
 	
 	def root; Inode.new(self, @sb.root_inode); end
@@ -499,29 +525,24 @@ class SquashFS
 		@frag_cache = BlockCache.new(self, BlockCache::FragmentCacheSize)
 		@id_table = IdTable.new(self, @md_cache)
 		@frag_table = FragTable.new(self, @md_cache)
+		@meta_idx = MetaIndex.new(self, MetaIndex::Slots)
 	end
 end
 
 fs = SquashFS.new(ARGV.shift)
-file = fs.lookup('vmlinuz')
-puts file.readlink
-exit
-
-parts = []
-fs.scan_files do |w, o|
-	case w
-	when :child
-		parts << o.name
-		puts parts.join('/')
-		parts.pop unless o.type == :dir
-	when :closedir
-		parts.pop
+if false
+	file = fs.lookup('vs2010.iso')
+	puts file.read_range(file.file_size - 100_000, 100).size
+	puts file.read_range(file.file_size / 2, 100).size
+else
+	fs.scan_paths do |inode, path|
+		puts path
 	end
 end
 
 # TODO
 # data block indices
-# xattrs
+# xattrs (incl symlink)
 # lookup/export?
 # compression types
 # parent links?
