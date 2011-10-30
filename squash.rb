@@ -75,32 +75,38 @@ class SquashFS
 		end
 	end
 	
-	def read_id_idxs
-		nblocks = SquashFS.divceil(@sb.no_ids * 4, MetadataSize)
-		@id_idxs = SquashFS.unpack64(read(@sb.id_table_start, 8 * nblocks))
+	class IdxTable
+		def initialize(fs, md_cache, start, count)
+			@md_cache = md_cache
+			nblocks = SquashFS.divceil(count * size, MetadataSize)
+			@idxs = SquashFS.unpack64(fs.read(start, 8 * nblocks))
+		end
+		
+		def get(i)
+			bidx, off = (i * size).divmod(MetadataSize)
+			@md_cache.get(@idxs[bidx])[off, size]
+		end
 	end
-	def id(i)
-		block = @id_idxs[i * 4 / MetadataSize]
-		@md_cache.get(block)[(i * 4) % MetadataSize, 4].unpack('V').first
+	class IdTable < IdxTable
+		def initialize(fs, md_cache)
+			super(fs, md_cache, fs.sb.id_table_start, fs.sb.no_ids)
+		end
+		def size; 4; end
+		def get(i); super.unpack('V').first; end
 	end
-	
 	class FragEntry < LEBitStruct
 		unsigned :start_block, 64
 		unsigned :size, 32
 		unsigned :pad, 32
 	end
-	FragEntSize = FragEntry.round_byte_length
-	def read_frag_idxs
-		nblocks = SquashFS.divceil(@sb.fragments * FragEntSize, MetadataSize)
-		@frag_idxs = SquashFS.unpack64(
-			read(@sb.fragment_table_start, 8 * nblocks))
+	class FragTable < IdxTable
+		def initialize(fs, md_cache)
+			super(fs, md_cache, fs.sb.fragment_table_start, fs.sb.fragments)
+		end
+		def size; FragEntry.round_byte_length; end
+		def get(i); FragEntry.new(super); end
 	end
-	def frag_lookup(i)
-		block = @frag_idxs[i * FragEntSize / MetadataSize]
-		FragEntry.new(@md_cache.get(block)[(i * FragEntSize) % MetadataSize,
-			FragEntSize])
-	end
-	
+		
 	def self.size_parse(sz, meta = false)
 		flag = 1 << (meta ? 15 : 24)
 		compressed = (sz & flag).zero?
@@ -149,8 +155,9 @@ class SquashFS
 		kl.new(read_metadata(pos, kl.round_byte_length))
 	end
 	
+	def id(i); @id_table.get(i); end
 	def read_fragment(i)
-		frag = frag_lookup(i)
+		frag = @frag_table.get(i)
 		@frag_cache.get(frag.start_block, frag.size)
 	end
 	
@@ -451,18 +458,14 @@ class SquashFS
 		
 		@md_cache = BlockCache.new(self, BlockCache::MetadataCacheSize)
 		@frag_cache = BlockCache.new(self, BlockCache::FragmentCacheSize)
-		read_id_idxs
-		read_frag_idxs
+		@id_table = IdTable.new(self, @md_cache)
+		@frag_table = FragTable.new(self, @md_cache)
 	end
 end
 
 fs = SquashFS.new(ARGV.shift)
-file = fs.lookup('vs2010.iso')
-file.read_file { |d| print d }
-exit
-
-puts file.read_range(file.file_size - 200_000, 100).size
-puts file.read_range(1223475200, 100).size
+file = fs.lookup('squashfs/Makefile')
+puts file.read_fragment
 exit
 
 parts = []
@@ -478,9 +481,9 @@ fs.scan_files do |w, o|
 end
 
 # TODO
-# coalesce table code
 # data block indices
 # more file types (symlinks!)
 # xattrs
 # lookup/export?
 # compression types
+# parent links?
