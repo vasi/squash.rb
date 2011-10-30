@@ -161,6 +161,63 @@ class SquashFS
 		@frag_cache.get(frag.start_block, frag.size)
 	end
 	
+	class StructMaker
+		def initialize(header)
+			@lines = IO.readlines(header)
+		end
+
+		Field = Struct.new(:name, :endian, :size)
+		Spec = Struct.new(:name, :fields)
+
+		def parse
+			ks = []
+			k = nil
+			@lines.each do |l|
+				if k
+					if l.match(/^\s*\}\s*;\s*$/)
+						ks << k
+						k = nil
+					elsif md = l.match(/^\s*__(le|be)(\d+)\s+(\w+)\s*;\s*$/)
+						k.fields << Field.new(md[3],
+							md[1] == 'le' ? :little : :big, md[2].to_i)
+					# ignore unknown fields	
+					end
+				elsif md = l.match(/^\s*struct\s+(\w+)\s*\{\s*$/)
+					k = Spec.new(md[1], [])
+				end
+			end
+			ks
+		end
+
+		def make(spec)
+			Class.new(BitStruct) do
+				spec.fields.each do |f|
+					unsigned f.name, f.size, :endian => f.endian
+				end
+			end
+		end
+
+		def make_inodes
+			ks = {}
+			parse.each do |spec|
+				md = spec.name.match(/^squashfs_(\w+)_inode$/) or next
+
+				# Remove common fields
+				snip = spec.fields.index { |f| f.name == 'inode_number' }
+				spec.fields.slice!(0, snip + 1)
+
+				ks[md[1]] = make(spec)
+			end
+			
+			order = %w[dir reg symlink dev dev ipc ipc]
+			ret = []
+			['', 'l'].each do |pre|
+				order.each { |n| ret << (ks[pre + n] || ks[n]) }
+			end
+			ret
+		end
+	end
+	
 	class Inode
 		InvalidFragment = 0xffffffff
 		
@@ -190,12 +247,12 @@ class SquashFS
 			unsigned	:file_size,		32
 			unsigned	:start_block,	32
 			unsigned	:parent_inode,	32
-			unsigned	:idx_count,		16
+			unsigned	:i_count,		16
 			unsigned	:offset,		16
 			unsigned	:xattr,			32
 		end
-		TypeClasses = [Dir, Reg, nil, nil, nil, nil, nil,
-			LDir]
+		
+		TypeClasses = StructMaker.new('squashfs_fs.h').make_inodes
 		
 		def type_idx; @base.type % Types.size - 1; end
 		def type; Types[type_idx]; end
@@ -371,10 +428,10 @@ class SquashFS
 		
 		def find_pos(name)
 			pos = start_pos
-			return pos unless @inode.respond_to?(:idx_count)
+			return pos unless @inode.respond_to?(:i_count)
 			
 			ipos = @inode.next_pos
-			@inode.idx_count.times do
+			@inode.i_count.times do
 				idx = @fs.read_md_struct(ipos, IndexEntry)
 				iname = @fs.read_metadata(ipos, idx.namelen + 1)
 				break if name < iname
