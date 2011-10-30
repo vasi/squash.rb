@@ -352,6 +352,10 @@ class SquashFS
 			read_range(0, @xtra.file_size, &block)
 		end
 		
+		def readlink
+			@fs.read_metadata(next_pos, @xtra.symlink_size)
+		end
+		
 		def pretty_print_instance_variables
 			instance_variables.sort - ['@fs']
 		end
@@ -499,8 +503,8 @@ class SquashFS
 end
 
 fs = SquashFS.new(ARGV.shift)
-file = fs.lookup('squashfs/Makefile')
-puts file.read_fragment
+file = fs.lookup('vmlinuz')
+puts file.readlink
 exit
 
 parts = []
@@ -517,7 +521,6 @@ end
 
 # TODO
 # data block indices
-# more file types (symlinks!)
 # xattrs
 # lookup/export?
 # compression types
