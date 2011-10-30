@@ -229,28 +229,6 @@ class SquashFS
 			unsigned	:mtime,		32
 			unsigned	:inode_number,	32
 		end
-		class Dir < LEBitStruct
-			unsigned	:start_block,	32
-			unsigned	:nlink,			32
-			unsigned	:file_size,		16
-			unsigned	:offset,		16
-			unsigned	:parent_inode,	32
-		end
-		class Reg < LEBitStruct
-			unsigned	:start_block,	32
-			unsigned	:fragment,		32
-			unsigned	:offset,		32
-			unsigned	:file_size,		32
-		end
-		class LDir < LEBitStruct
-			unsigned	:nlink,			32
-			unsigned	:file_size,		32
-			unsigned	:start_block,	32
-			unsigned	:parent_inode,	32
-			unsigned	:i_count,		16
-			unsigned	:offset,		16
-			unsigned	:xattr,			32
-		end
 		
 		TypeClasses = StructMaker.new('squashfs_fs.h').make_inodes
 		
