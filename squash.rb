@@ -5,6 +5,7 @@ require 'bit-struct'
 require 'zlib'
 require 'time'
 require 'pp'
+require 'inline'
 
 class SquashFS
 	class LEBitStruct < BitStruct; default_options :endian => :little; end
@@ -156,7 +157,10 @@ class SquashFS
 		compressed, size = SquashFS.size_parse(header, !len)
 		
 		data = @io.read(size)
-		data = Zlib::Inflate.inflate(data) if compressed
+		if compressed
+			outsize = len ? @sb.block_size : MetadataSize
+			data = decompress(data, outsize) if compressed
+		end
 		return [hsz + size, data]
 	end
 	
@@ -676,6 +680,28 @@ class SquashFS
 	
 	def root; Inode.new(self, @sb.root_inode); end
 	
+	Decompressors = [ :zlib, :lzma, :lzo, :xz ]
+	def decompress(data, osize); __send__(@decomp, data, osize); end
+	def zlib(data, osize); Zlib::Inflate.inflate(data); end
+	
+	inline do |builder|
+		builder.add_compile_flags '-I/Library/Fink/lion/include/lzo'
+		builder.add_link_flags '-L/Library/Fink/lion/lib -llzo2'
+		builder.include '<lzo1x.h>'
+		builder.c <<LZO
+			VALUE lzo(VALUE src, unsigned long osize) {
+				VALUE dst = rb_str_new(NULL, osize);
+				int res = lzo1x_decompress_safe(RSTRING(src)->ptr,
+					RSTRING(src)->len, RSTRING(dst)->ptr, (lzo_uintp)&osize,
+					NULL);
+				if (res != LZO_E_OK)
+					return Qnil;
+				rb_str_set_len(dst, osize);
+				return dst;
+			}
+LZO
+	end
+	
 	def initialize(path)
 		@io = open(path)
 		@sb = Superblock.new(@io)
@@ -683,7 +709,9 @@ class SquashFS
 			unless @sb.magic == Superblock::Magic
 		raise 'Unsupported version' \
 			unless @sb.vers_maj == 4 && @sb.vers_min >= 0
-		raise 'FIXME: Compression not zlib' unless @sb.compression == 1
+		
+		@decomp = Decompressors[@sb.compression - 1] or
+			raise 'Unknown compression'
 		
 		@md_cache = BlockCache.new(self, BlockCache::MetadataCacheSize)
 		@frag_cache = BlockCache.new(self, BlockCache::FragmentCacheSize)
@@ -695,17 +723,10 @@ class SquashFS
 end
 
 fs = SquashFS.new(ARGV.shift)
-if true
-	file = fs.lookup('bar')
-	pp file.xattr_dump
-else
-	fs.scan_paths do |inode, path|
-		p [path, inode.xattr] if inode.respond_to?(:xattr) &&
-			inode.xattr != SquashFS::Inode::InvalidXattr
-	end
-end
+fs.root.directory.children { |c| puts c.name }
+print fs.lookup('extensions.py').read_file
 
 # TODO
-# lookup/export?
 # compression types
-# parent links?
+# lookup/export?
+# parent links: requires lookup, afaict
