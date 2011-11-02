@@ -116,7 +116,7 @@ class SquashFS
 	end
 	# Read block, returning also the size
 	def read_block_size(off, len = nil)
-#		STDERR.puts [off, len].inspect
+		STDERR.puts [off, len].inspect
 		if len
 			hsz = 0
 			header = len
@@ -133,7 +133,7 @@ class SquashFS
 	end
 	
 	def read_metadata(pos, size)
-#		STDERR.puts [pos, size].inspect
+		STDERR.puts [pos, size].inspect
 		ret = ""
 		while size > 0
 			bsz, data = @md_cache.get_size(pos.block)
@@ -307,43 +307,49 @@ class SquashFS
 			@fs.read_metadata(next_pos, block_count * 4).unpack('V*')
 		end
 		
-		def read_block(n, bscache = nil)
-			start = @xtra.start_block
-			hdr = 0
-			(bscache || read_block_sizes).each_with_index do |sz,i|
-				hdr = sz
-				break if i == n
-				comp, bsz = SquashFS.size_parse(sz)
-				start += bsz
-			end
-			
+		def read_block(pos, hdr)
 			if hdr == 0 # Hole
-				dsz = [@xtra.file_size - n * @fs.sb.block_size,
+				dsz = [@xtra.file_size - block_count * @fs.sb.block_size,
 					@fs.sb.block_size].min
 				return "\0" * dsz
 			else
-				bsz, data = @fs.read_block_size(start, hdr)
+				bsz, data = @fs.read_block_size(pos, hdr)
 				return data
 			end
 		end
 		
 		def read_range(start, size, &block)
+			p ['read', start, size]
 			raise 'Too far' if start > @xtra.file_size
-			bsc = nil
+			
+			# Block list info
+			blidx, blpos, blsizes = 0, @xtra.start_block, read_block_sizes
+			
+			bnum, off = start.divmod(@fs.sb.block_size)
 			ret = []
+			
 			while size > 0 && start < @xtra.file_size
-				bnum, off = start.divmod(@fs.sb.block_size)
-				data = if bnum >= block_count
-					read_fragment
-				else
-					bsc ||= read_block_sizes
-					read_block(bnum, bsc)
+				data = nil
+				if bnum >= block_count # It's a fragment
+					data = read_fragment
+				else # Look at the block list
+					hdr = blsizes.shift
+					compressed, bsize = SquashFS.size_parse(hdr)
+					if bnum == blidx # Reached a block we want to read
+						data = read_block(blpos, hdr)
+					end
+					blidx += 1
+					blpos += bsize
 				end
-				take = [data.size - off, size].min
-				data = data[off, take] if off != 0 && take != data.size
-				block ? block[data] : (ret << data)
-				start += take
-				size -= take
+				if data
+					take = [data.size - off, size].min
+					data = data[off, take] if off != 0 || take != data.size
+					block ? block[data] : (ret << data)
+					start += take
+					size -= take
+					bnum += 1
+					off = 0
+				end
 			end
 			return block ? nil : ret.join('')
 		end
@@ -529,14 +535,20 @@ class SquashFS
 	end
 end
 
+require 'digest/md5'
 fs = SquashFS.new(ARGV.shift)
-if false
+if true
 	file = fs.lookup('vs2010.iso')
-	puts file.read_range(file.file_size - 100_000, 100).size
-	puts file.read_range(file.file_size / 2, 100).size
+	[file.file_size - 250_000, file.file_size / 2].each do |s|
+		data = file.read_range(s, 200_000)
+		puts data.size
+		puts Digest::MD5.hexdigest(data)
+	end
 else
 	fs.scan_paths do |inode, path|
-		puts path
+		if inode && inode.type == :reg
+			puts inode.next_pos.offset
+		end
 	end
 end
 
