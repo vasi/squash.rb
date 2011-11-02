@@ -684,10 +684,18 @@ class SquashFS
 	def decompress(data, osize); __send__(@decomp, data, osize); end
 	def zlib(data, osize); Zlib::Inflate.inflate(data); end
 	
-	inline do |builder|
-		builder.add_compile_flags '-I/Library/Fink/lion/include/lzo'
-		builder.add_link_flags '-L/Library/Fink/lion/lib -llzo2'
-		builder.include '<lzo1x.h>'
+	def self.fink_build(hdr, lib)
+		bin = `which fink`
+		md = bin.match(%r{^(.*)/bin/fink}) and prefix = md[1]
+		inline do |builder|
+			builder.add_compile_flags "-I#{prefix}/include"
+			builder.add_link_flags "-L#{prefix}/lib -l#{lib}"
+			builder.include "<#{hdr}>"
+			yield builder, prefix
+		end
+	end
+	fink_build('lzo1x.h', 'lzo2') do |builder, prefix|
+		builder.add_compile_flags "-I#{prefix}/include/lzo"
 		builder.c <<LZO
 			VALUE lzo(VALUE src, unsigned long osize) {
 				VALUE dst = rb_str_new(NULL, osize);
@@ -700,6 +708,22 @@ class SquashFS
 				return dst;
 			}
 LZO
+	end
+	fink_build('lzma.h', 'lzma') do |builder, prefix|
+		builder.c <<XZ
+			VALUE xz(VALUE src, unsigned long osize) {
+				VALUE dst = rb_str_new(NULL, osize);
+				uint64_t memlimit = UINT64_MAX;
+				size_t ipos = 0, opos = 0;
+				lzma_ret res = lzma_stream_buffer_decode(&memlimit, 0, NULL,
+					RSTRING(src)->ptr, &ipos, RSTRING(src)->len,
+					RSTRING(dst)->ptr, &opos, osize);
+				if (res != LZMA_OK)
+					return Qnil;
+				rb_str_set_len(dst, opos);
+				return dst;
+			}
+XZ
 	end
 	
 	def initialize(path)
@@ -723,10 +747,9 @@ LZO
 end
 
 fs = SquashFS.new(ARGV.shift)
-fs.root.directory.children { |c| puts c.name }
-print fs.lookup('extensions.py').read_file
+#fs.scan_paths { |i,p| puts p }
+print fs.lookup('etc/passwd').read_file
 
 # TODO
-# compression types
 # lookup/export?
 # parent links: requires lookup, afaict
