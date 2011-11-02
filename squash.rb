@@ -23,14 +23,14 @@ class SquashFS
 		unsigned	:no_ids,		16
 		unsigned	:vers_maj,		16
 		unsigned	:vers_min,		16
-		unsigned	:root_inode,	64
-		unsigned	:bytes_used,	64
-		unsigned	:id_table_start,		64
-		unsigned	:xattr_id_table_start,	64
-		unsigned	:inode_table_start,		64
-		unsigned	:directory_table_start,	64
-		unsigned	:fragment_table_start,	64
-		unsigned	:lookup_table_start,	64
+		signed	:root_inode,	64
+		signed	:bytes_used,	64
+		signed	:id_table_start,		64
+		signed	:xattr_id_table_start,	64
+		signed	:inode_table_start,		64
+		signed	:directory_table_start,	64
+		signed	:fragment_table_start,	64
+		signed	:lookup_table_start,	64
 	
 		def compr_inode?; (flags & 1).zero?; end
 		def compr_data?; (flags & 2).zero?; end
@@ -45,7 +45,7 @@ class SquashFS
 	MetadataSize = 8192
 	Types = [:dir, :reg, :sym, :blkd, :chrd, :fifo, :sock]
 	
-	attr_reader :sb, :meta_idx
+	attr_reader :sb
 	
 	def read(off, size)
 		@io.seek(off)
@@ -87,6 +87,7 @@ class SquashFS
 			@md_cache.get(@idxs[bidx])[off, size]
 		end
 	end
+	
 	class IdTable < IdxTable
 		def initialize(fs, md_cache)
 			super(fs, md_cache, fs.sb.id_table_start, fs.sb.no_ids)
@@ -94,6 +95,33 @@ class SquashFS
 		def size; 4; end
 		def get(i); super.unpack('V').first; end
 	end
+	
+	class XattrInfo < LEBitStruct
+		unsigned :xattr, 64
+		unsigned :count, 32
+		unsigned :size, 32
+	end
+	class XattrTable < IdxTable
+		class XattrTableInfo < LEBitStruct
+			signed :start, 64
+			unsigned :count, 32
+			unsigned :pad, 32
+		end
+		def initialize(fs, md_cache)
+			off = fs.sb.xattr_id_table_start
+			if off == Inode::InvalidBlk
+				@info = nil
+				return
+			end
+			isize = XattrTableInfo.round_byte_length
+			@info = XattrTableInfo.new(fs.read(off, isize))
+			super(fs, md_cache, off + isize, @info.count)
+		end
+		def pos(x); MDPos.inode(x, @info.start); end
+		def size; XattrInfo.round_byte_length; end
+		def get(i); @info && XattrInfo.new(super); end
+	end
+	
 	class FragEntry < LEBitStruct
 		unsigned :start_block, 64
 		unsigned :size, 32
@@ -161,6 +189,8 @@ class SquashFS
 		frag = @frag_table.get(i)
 		@frag_cache.get(frag.start_block, frag.size)
 	end
+	def xattr_pos(p); @xattr_table.pos(p); end
+	def xattr_info(i); @xattr_table.get(i); end
 	
 	class StructMaker
 		def initialize(header)
@@ -221,6 +251,8 @@ class SquashFS
 	
 	class Inode
 		InvalidFragment = 0xffffffff
+		InvalidXattr = 0xffffffff
+		InvalidBlk = -1
 		
 		class Base < LEBitStruct
 			unsigned	:type,		16
@@ -235,6 +267,7 @@ class SquashFS
 		
 		def type_idx; @base.type % Types.size - 1; end
 		def type; Types[type_idx]; end
+		def long?; @base.type > Types.size; end
 		def time; Time.at(@base.mtime); end
 		def uid; @fs.id(@base.uid); end
 		def gid; @fs.id(@base.gid); end
@@ -268,6 +301,14 @@ class SquashFS
 			klass = TypeClasses[@base.type - 1] or raise 'Unsupported type'
 			@xtra = @fs.read_md_struct(pos, klass)
 			@pos = pos
+			
+			# Special case: long symlinks
+			@xattr = nil
+			if type == :sym && long?
+				p = next_pos
+				readlink(p)
+				@xattr = @fs.read_metadata(p, 4).unpack('V').first
+			end
 		end
 		
 		def directory
@@ -324,7 +365,7 @@ class SquashFS
 			return '' if size <= 0
 			
 			# Block list info
-			blidx, blpos, blsizes = @fs.meta_idx.blocklist(self, start, size)
+			blidx, blpos, blsizes = @fs.blocklist(self, start, size)
 			
 			bnum, off = start.divmod(@fs.sb.block_size)
 			ret = []
@@ -359,8 +400,61 @@ class SquashFS
 			read_range(0, @xtra.file_size, &block)
 		end
 		
-		def readlink
-			@fs.read_metadata(next_pos, @xtra.symlink_size)
+		def readlink(pos = nil)
+			@fs.read_metadata(pos || next_pos, @xtra.symlink_size)
+		end
+		
+		class XattrEntry < LEBitStruct
+			unsigned :type, 16
+			unsigned :size, 16
+
+			XattrPrefixes = %w[user trusted security]
+			XattrOOL = 0x100
+			def ool?; (type & XattrOOL) != 0; end
+			def prefix; XattrPrefixes[type & ~XattrOOL] + '.'; end
+		end
+		
+		def xattr_num
+			x = @xattr || (@xtra.respond_to?(:xattr) && @xtra.xattr)
+			return (x && x != InvalidXattr) ? x : nil
+		end
+		
+		def xattr_each(default = nil, &block)
+			n = xattr_num or return default
+			info = @fs.xattr_info(n)
+			pos = @fs.xattr_pos(info.xattr)
+			
+			info.count.times do
+				entry = @fs.read_md_struct(pos, XattrEntry)
+				name_end = @fs.read_metadata(pos, entry.size)
+				name = entry.prefix + name_end
+				sz = @fs.read_metadata(pos, 4).unpack('V').first
+				block[pos, name, entry.ool?, sz]
+				@fs.read_metadata(pos, sz)
+			end
+		end
+		
+		def xattr_list
+			ret = []
+			xattr_each([]) { |pos, name, ool, sz| ret << name }
+			ret
+		end
+		
+		def xattr_get(name)
+			xattr_each(nil) do |pos, xname, ool, sz|
+				next unless xname == name
+				return @fs.read_metadata(pos, sz) unless ool
+				# Indirect xattr
+				x2 = SquashFS.unpack64(@fs.read_metadata(pos, 8)).first
+				p2 = @fs.xattr_pos(x2)
+				s2 = @fs.read_metadata(p2, 4).unpack('V').first
+				return @fs.read_metadata(p2, s2)
+			end
+			nil
+		end
+		
+		def xattr_dump
+			xattr_list.inject({}) { |h,k| h[k] = xattr_get(k); h }
 		end
 		
 		def pretty_print_instance_variables
@@ -442,6 +536,9 @@ class SquashFS
 				return [0, inode.start_block, sizes]
 			end
 		end
+	end
+	def blocklist(inode, start, size)
+		@meta_idx.blocklist(inode, start, size)
 	end
 	
 	class Directory
@@ -592,30 +689,23 @@ class SquashFS
 		@frag_cache = BlockCache.new(self, BlockCache::FragmentCacheSize)
 		@id_table = IdTable.new(self, @md_cache)
 		@frag_table = FragTable.new(self, @md_cache)
+		@xattr_table = XattrTable.new(self, @md_cache)
 		@meta_idx = MetaIndex.new(self, MetaIndex::Slots)
 	end
 end
 
-require 'digest/md5'
 fs = SquashFS.new(ARGV.shift)
 if true
-	file = fs.lookup('vs2010.iso')
-	[file.file_size - 250_000, file.file_size / 2].each do |s|
-		data = file.read_range(s, 200_000)
-		puts data.size
-		puts Digest::MD5.hexdigest(data)
-	end
+	file = fs.lookup('bar')
+	pp file.xattr_dump
 else
 	fs.scan_paths do |inode, path|
-		if inode && inode.type == :reg
-			puts inode.next_pos.offset
-		end
+		p [path, inode.xattr] if inode.respond_to?(:xattr) &&
+			inode.xattr != SquashFS::Inode::InvalidXattr
 	end
 end
 
 # TODO
-# data block indices
-# xattrs (incl symlink)
 # lookup/export?
 # compression types
 # parent links?
