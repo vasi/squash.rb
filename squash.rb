@@ -116,7 +116,7 @@ class SquashFS
 	end
 	# Read block, returning also the size
 	def read_block_size(off, len = nil)
-		STDERR.puts [off, len].inspect
+		#STDERR.puts [off, len].inspect
 		if len
 			hsz = 0
 			header = len
@@ -132,10 +132,11 @@ class SquashFS
 		return [hsz + size, data]
 	end
 	
-	def read_metadata(pos, size)
-		STDERR.puts [pos, size].inspect
+	def read_metadata(pos, size, &per_md)
+		#STDERR.puts [pos, size].inspect
 		ret = ""
 		while size > 0
+			per_md[pos.block] if per_md
 			bsz, data = @md_cache.get_size(pos.block)
 			take = [data.size - pos.offset, size].min
 			ret << data[pos.offset, take]
@@ -303,8 +304,8 @@ class SquashFS
 			fragment? ? (sz / bs) : SquashFS.divceil(sz, bs)
 		end
 		
-		def read_block_sizes # FIXME
-			@fs.read_metadata(next_pos, block_count * 4).unpack('V*')
+		def read_block_sizes(start, count, &per_md)
+			@fs.read_metadata(start, count * 4, &per_md).unpack('V*')
 		end
 		
 		def read_block(pos, hdr)
@@ -319,11 +320,11 @@ class SquashFS
 		end
 		
 		def read_range(start, size, &block)
-			p ['read', start, size]
 			raise 'Too far' if start > @xtra.file_size
+			return '' if size <= 0
 			
 			# Block list info
-			blidx, blpos, blsizes = 0, @xtra.start_block, read_block_sizes
+			blidx, blpos, blsizes = @fs.meta_idx.blocklist(self, start, size)
 			
 			bnum, off = start.divmod(@fs.sb.block_size)
 			ret = []
@@ -369,6 +370,10 @@ class SquashFS
 	
 	class MetaIndex
 		Slots = 16
+		MinBlocks = 2048
+		
+		Entry = Struct.new(:inum, :positions)
+		Position = Struct.new(:block_pos, :md_block)
 		
 		def initialize(fs, slots)
 			@fs = fs
@@ -376,10 +381,66 @@ class SquashFS
 			@pos = 0
 		end
 		
-		def get_index(inode, start, len)
-			sizes = @fs.read_metadata(inode.next_pos, inode.block_count * 4).
-				unpack('V*')
-			return inode.start_block, 0, sizes
+		def entry(inode)
+			@slots.find { |s| s && s.inum = inode.inode_number }
+		end
+		def want?(inode); inode.block_count >= MinBlocks; end
+		
+		# First block entry idx in a new metadata block
+		def first(inode)
+			SquashFS.divceil(MetadataSize - inode.next_pos.offset, 4)
+		end
+		def step; MetadataSize / 4; end
+		
+		def add_index(inode, md_bpos, sizes)
+			positions = []
+			md_bpos.shift # don't want the zero'th md-block
+			first = first(inode)
+		
+			bpos = inode.start_block
+			sizes.each_with_index do |hdr, i|
+				if i == first
+					positions << Position.new(bpos, md_bpos.shift)
+					first += step
+				end
+				compressed, bsize = SquashFS.size_parse(hdr)
+				bpos += bsize
+			end
+		
+			@slots[@pos] = Entry.new(inode.inode_number, positions)
+			@pos = (@pos + 1) % @slots.size
+		end
+		
+		def read_index(inode, positions, start, size)
+			bfirst, blast = [start, start + size - 1].map do |p|
+				[SquashFS.divceil(p, @fs.sb.block_size),
+					inode.block_count].min
+			end
+			i = (bfirst - first(inode)) / step
+			if i < 0
+				bnum, bpos, mdpos = 0, inode.start_block, inode.next_pos
+			else
+				p = positions[i]
+				bnum = first(inode) + i * step
+				bpos = p.block_pos
+				mdpos = MDPos.new(p.md_block, inode.start_block % 4)
+			end
+			return bnum, bpos, inode.read_block_sizes(mdpos,
+				blast - bnum + 1)
+		end
+		
+		def blocklist(inode, start, size)
+			if e = entry(inode)
+				return read_index(inode, e.positions, start, size)
+			else
+				md_bpos = []
+				per_md = want?(inode) ? proc { |pos| md_bpos << pos } : nil
+				sizes = inode.read_block_sizes(inode.next_pos,
+					inode.block_count, &per_md)
+				
+				add_index(inode, md_bpos, sizes) if want?(inode)
+				return [0, inode.start_block, sizes]
+			end
 		end
 	end
 	
