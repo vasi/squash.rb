@@ -97,6 +97,17 @@ class SquashFS
 		def get(i); super.unpack('V').first; end
 	end
 	
+	class ExportTable < IdxTable
+		def initialize(fs, md_cache)
+			if (p = fs.sb.lookup_table_start) != Inode::InvalidBlk
+				@present = true
+				super(fs, md_cache, p, fs.sb.inodes)
+			end
+		end
+		def size; 8; end
+		def get(i); @present && SquashFS.unpack64(super).first; end
+	end
+	
 	class XattrInfo < LEBitStruct
 		unsigned :xattr, 64
 		unsigned :count, 32
@@ -461,6 +472,10 @@ class SquashFS
 			xattr_list.inject({}) { |h,k| h[k] = xattr_get(k); h }
 		end
 		
+		def parent
+			@fs.lookup_inode_number(@xtra.parent_inode)
+		end
+		
 		def pretty_print_instance_variables
 			instance_variables.sort - ['@fs']
 		end
@@ -678,6 +693,10 @@ class SquashFS
 		end
 	end
 	
+	def lookup_inode_number(num)
+		Inode.new(self, @export_table.get(num - 1))
+	end
+	
 	def root; Inode.new(self, @sb.root_inode); end
 	
 	Decompressors = [ :zlib, :lzma, :lzo, :xz ]
@@ -742,14 +761,11 @@ XZ
 		@id_table = IdTable.new(self, @md_cache)
 		@frag_table = FragTable.new(self, @md_cache)
 		@xattr_table = XattrTable.new(self, @md_cache)
+		@export_table = ExportTable.new(self, @md_cache)
 		@meta_idx = MetaIndex.new(self, MetaIndex::Slots)
 	end
 end
 
 fs = SquashFS.new(ARGV.shift)
-#fs.scan_paths { |i,p| puts p }
-print fs.lookup('etc/passwd').read_file
-
-# TODO
-# lookup/export?
-# parent links: requires lookup, afaict
+file = fs.lookup('home/vasi/Dropbox')
+file.parent.directory.children { |c| puts c.name }
