@@ -305,11 +305,12 @@ class SquashFS
 		
 		def next_pos; @pos.dup; end
 		
-		attr_reader :xtra
+		attr_reader :xtra, :inode_id
 		
 		def initialize(fs, pos)
 			@fs = fs
 			pos = MDPos.inode(pos) unless pos.respond_to?(:offset)
+			@inode_id = (pos.block << 16) + pos.offset
 			pos.block += @fs.sb.inode_table_start
 			@base = @fs.read_md_struct(pos, Base)
 			
@@ -568,7 +569,7 @@ class SquashFS
 		end
 		class Entry < LEBitStruct
 			unsigned	:offset, 16
-			unsigned	:inode_number, 16
+			signed		:inode_number, 16
 			unsigned	:type, 16
 			unsigned	:size, 16
 		end
@@ -674,22 +675,26 @@ class SquashFS
 	
 	def scan(inode = nil, &block)
 		inode ||= root
-		def scan_inner(inode, name, &block)
-			block[inode, name]
-			return unless inode.type == :dir
-			inode.directory.children do |c|
-				scan_inner(c.inode, c.name, &block)
-			end
-			block[nil, nil]
+		block[:dir, inode]
+		inode.directory.children do |c|
+			block[:child, c]
+			scan(c.inode, &block) if c.type == :dir
 		end
-		scan_inner(inode || root, nil, &block)
+		block[:dirend, nil]
 	end
 	def scan_paths(inode = nil, &block)
 		parts = []
-		scan(inode) do |i, name|
-			parts << name if name
-			block[i, parts.join('/')] if i
-			parts.pop unless i && i.type == :dir
+		scan(inode) do |t, c|
+			parts << c.name if t == :child
+			block[t, parts.join('/'), c]
+			parts.pop if t == :dirend || (t == :child && c.type != :dir)
+		end 		
+	end
+	def scan_ipaths(inode = nil, &block)
+		inode ||= root
+		block[inode, '']
+		scan_paths(inode) do |t, p, c|
+			block[c.inode, p] if t == :child
 		end
 	end
 	
@@ -707,7 +712,7 @@ class SquashFS
 		bin = `which fink`
 		md = bin.match(%r{^(.*)/bin/fink}) and prefix = md[1]
 		inline do |builder|
-			builder.add_compile_flags "-I#{prefix}/include"
+			builder.add_compile_flags "-I#{prefix}/include -Wno-pointer-sign"
 			builder.add_link_flags "-L#{prefix}/lib -l#{lib}"
 			builder.include "<#{hdr}>"
 			yield builder, prefix
@@ -767,5 +772,15 @@ XZ
 end
 
 fs = SquashFS.new(ARGV.shift)
-file = fs.lookup('home/vasi/Dropbox')
-file.parent.directory.children { |c| puts c.name }
+
+# fs.scan_paths do |t, p, c|
+# 	puts "%d: %s" % [c.inode_number, p] if t == :child
+# end
+# exit 0
+
+fs.scan_ipaths do |i, p|
+	puts "%d: %s - %s%s" % [i.inode_number, p, i.long? ? 'l' : '', i.type]
+end
+
+# TODO
+# compression options
