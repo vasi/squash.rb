@@ -786,6 +786,3 @@ fs = SquashFS.new(ARGV.shift)
 fs.scan_ipaths do |i, p|
 	puts "%3d - %s" % [i.inode_number, p]
 end
-
-# TODO
-# compression options
