@@ -602,6 +602,11 @@ class SquashFS
 				end
 			end
 		end
+		def nchildren
+			c = 0
+			children { c += 1 }
+			c
+		end
 		
 		def start_pos
 			MDPos.new(@inode.start_block + @fs.sb.directory_table_start,
@@ -616,12 +621,14 @@ class SquashFS
 			@inode.i_count.times do
 				idx = @fs.read_md_struct(ipos, IndexEntry)
 				iname = @fs.read_metadata(ipos, idx.namelen + 1)
+				p [(pos.offset + idx.dirpos) % MetadataSize, iname]
 				break if name < iname
 				
 				pos.length = idx.dirpos
 				pos.block = idx.start_block + @fs.sb.directory_table_start
 			end
 			pos.offset = (pos.offset + pos.length) % MetadataSize
+			p [:index, pos]
 			return pos
 		end
 		
@@ -773,13 +780,11 @@ end
 
 fs = SquashFS.new(ARGV.shift)
 
-# fs.scan_paths do |t, p, c|
-# 	puts "%d: %s" % [c.inode_number, p] if t == :child
-# end
-# exit 0
+#fs.lookup('var/lib/dpkg/info').directory.children { |c| puts c.name }; exit 0
+#fs.lookup('var/lib/dpkg/info/zip.list'); exit 0
 
 fs.scan_ipaths do |i, p|
-	puts "%d: %s - %s%s" % [i.inode_number, p, i.long? ? 'l' : '', i.type]
+	puts "%3d - %s" % [i.inode_number, p]
 end
 
 # TODO
