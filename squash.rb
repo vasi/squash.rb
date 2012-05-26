@@ -200,8 +200,9 @@ class SquashFS
 	end
 	
 	def id(i); @id_table.get(i); end
+	def read_frag_entry(i); @frag_table.get(i); end
 	def read_fragment(i)
-		frag = @frag_table.get(i)
+		frag = read_frag_entry(i)
 		@frag_cache.get(frag.start_block, frag.size)
 	end
 	def xattr_pos(p); @xattr_table.pos(p); end
@@ -326,6 +327,23 @@ class SquashFS
 				@xattr = @fs.read_metadata(p, 4).unpack('V').first
 			end
 		end
+		
+		def used_space
+			u = 0
+			blidx, blpos, blsizes = @fs.blocklist(self, 0, @xtra.file_size)
+			blsizes.each { |h| c, s = SquashFS.size_parse(h); u += s }
+			
+			# pro-rate fragment size
+			if fragment?
+				entry = @fs.read_frag_entry(@xtra.fragment)
+				c, csize = SquashFS.size_parse(entry.size)
+				whole = @fs.read_fragment(@xtra.fragment)
+				fsize = @xtra.file_size % @fs.sb.block_size
+				u += csize * fsize / whole.size
+			end
+			return u 
+		end
+		def ratio; used_space.to_f / @xtra.file_size; end
 		
 		def directory
 			Directory.new(@fs, self)
@@ -780,9 +798,6 @@ end
 
 fs = SquashFS.new(ARGV.shift)
 
-#fs.lookup('var/lib/dpkg/info').directory.children { |c| puts c.name }; exit 0
-#fs.lookup('var/lib/dpkg/info/zip.list'); exit 0
-
 fs.scan_ipaths do |i, p|
-	puts "%3d - %s" % [i.inode_number, p]
+	puts "%5.1f - %s" % [i.ratio * 100, p] if i.type == :reg
 end
