@@ -733,9 +733,10 @@ class SquashFS
 	def decompress(data, osize); __send__(@decomp, data, osize); end
 	def zlib(data, osize); Zlib::Inflate.inflate(data); end
 	
-	def self.fink_build(hdr, lib)
-		bin = `which fink`
-		md = bin.match(%r{^(.*)/bin/fink}) and prefix = md[1]
+	PKGMGR = 'port'
+	def self.pkg_build(hdr, lib)
+		bin = `which #{PKGMGR}`
+		md = bin.match(%r{^(.*)/bin/#{PKGMGR}}) and prefix = md[1]
 		inline do |builder|
 			builder.add_compile_flags "-I#{prefix}/include -Wno-pointer-sign"
 			builder.add_link_flags "-L#{prefix}/lib -l#{lib}"
@@ -743,7 +744,7 @@ class SquashFS
 			yield builder, prefix
 		end
 	end
-	fink_build('lzo1x.h', 'lzo2') do |builder, prefix|
+	pkg_build('lzo1x.h', 'lzo2') do |builder, prefix|
 		builder.add_compile_flags "-I#{prefix}/include/lzo"
 		builder.c <<LZO
 			VALUE lzo(VALUE src, unsigned long osize) {
@@ -758,7 +759,7 @@ class SquashFS
 			}
 LZO
 	end
-	fink_build('lzma.h', 'lzma') do |builder, prefix|
+	pkg_build('lzma.h', 'lzma') do |builder, prefix|
 		builder.c <<XZ
 			VALUE xz(VALUE src, unsigned long osize) {
 				VALUE dst = rb_str_new(NULL, osize);
